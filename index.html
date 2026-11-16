@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Friends Chat</title><link rel="stylesheet" href="style.css">
+</head><body>
+<section id="auth"><div class="card">
+  <h1>💬 Friends Chat</h1><p class="sub">Chat with your friends in real time</p>
+  <div class="tabs"><button id="tabLogin" class="on" onclick="setAuth('login')">Log in</button><button id="tabReg" onclick="setAuth('reg')">Sign up</button></div>
+  <form id="loginForm" onsubmit="submitAuth(event,'login')">
+    <input name="email" type="email" placeholder="Email" required><input name="password" type="password" placeholder="Password" required>
+    <button class="primary">Log in</button></form>
+  <form id="regForm" hidden onsubmit="submitAuth(event,'reg')">
+    <input name="name" placeholder="Full name" required><input name="email" type="email" placeholder="Email" required>
+    <input name="phone" type="tel" placeholder="Phone number" required><input name="password" type="password" placeholder="Password (min 8 characters)" minlength="8" required>
+    <button class="primary">Create account</button></form>
+</div></section>
+
+<div id="app" hidden>
+  <aside id="side">
+    <header><div id="me" onclick="settingsModal()"></div><div class="grow"></div>
+      <button class="icon" title="New group" onclick="groupModal()">👥</button><button class="icon" title="Settings" onclick="settingsModal()">⚙️</button></header>
+    <nav class="tabs"><button id="t-chats" class="on" onclick="switchTab('chats')">Chats</button><button id="t-friends" onclick="switchTab('friends')">Friends</button><button id="t-find" onclick="switchTab('find')">Find</button></nav>
+    <input id="searchBox" hidden placeholder="Search by name or @username" oninput="searchUsers(this.value)">
+    <div id="list"></div>
+  </aside>
+  <main id="chat">
+    <div id="empty"><h2>💬</h2><p>Select a chat or add a friend to start talking</p></div>
+    <div id="pane" hidden>
+      <header><button class="icon back" onclick="closeChat()">←</button><div id="head" class="row grow"></div></header>
+      <div id="msgs"></div>
+      <footer>
+        <label class="icon" title="Share photo, video or document">📎<input id="file" type="file" hidden onchange="pickFile(this)"></label>
+        <input id="text" placeholder="Type a message" autocomplete="off" oninput="toggleBtns()" onkeydown="if(event.key==='Enter')sendText()">
+        <button id="send" class="primary round" hidden onclick="sendText()">➤</button>
+        <button id="mic" class="primary round" title="Record voice message" onclick="toggleRec()">🎤</button>
+      </footer>
+    </div>
+  </main>
+</div>
+<div id="modal" class="modal" hidden onclick="if(event.target===this)closeModal()"><div class="card" id="modalBody"></div></div>
+<script src="app.js"></script>
+</body></html>
