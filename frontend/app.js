@@ -48,7 +48,7 @@ function openChat(id){
   (msgs[id]?Promise.resolve():api(`/chats/${id}/messages`).then(m=>msgs[id]=m)).then(()=>{renderMsgs();markRead()});
 }
 function closeChat(){active=null;document.body.classList.remove('chat-open');renderList()}
-function renderHead(){const c=cur();if(!c)return;const o=c.other;
+function renderHead(){const c=cur();if(!c)return;const o=c.other;$('#callBtns').hidden=c.is_group;
   $('#head').innerHTML=`${av(c.name,c.avatar,o?.online)}<div><b>${esc(c.name)}</b><small>${c.is_group?c.members.map(m=>esc(m.name)).join(', '):o?.online?'online':'last seen '+new Date(o.last_seen).toLocaleString([],{dateStyle:'short',timeStyle:'short'})}</small></div>`}
 function msgHTML(m,c){
   const mine=m.sender_id===me.id,s=c.members.find(u=>u.id===m.sender_id),u=esc(m.file_url);
@@ -74,9 +74,10 @@ async function toggleRec(){
 function connect(){
   ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${token}`);
   ws.onmessage=e=>handle(JSON.parse(e.data));
-  ws.onclose=()=>{if(token)setTimeout(connect,2000)};
+  ws.onclose=()=>{onSocketClosed();if(token)setTimeout(connect,2000)};
 }
 async function handle(d){
+  if(String(d.type).startsWith('call_'))return handleCall(d);   // calling events live in calls.js
   if(d.type==='message'){
     const m=d.message;let c=chats.find(c=>c.id===m.chat_id);
     if(!c){await loadChats();c=chats.find(c=>c.id===m.chat_id);if(!c)return}
@@ -105,12 +106,13 @@ const closeModal=()=>$('#modal').hidden=true;
 function groupModal(){modal(`<h3>New group</h3><input id="gname" placeholder="Group name">${friends.map(f=>`<label class="row"><input type="checkbox" class="gm" value="${f.id}"> ${esc(f.name)}</label>`).join('')||'<p class="sub">Add some friends first.</p>'}<div class="actions"><button onclick="closeModal()">Cancel</button><button class="primary" onclick="makeGroup()">Create</button></div>`)}
 async function makeGroup(){try{await api('/groups','POST',{name:$('#gname').value,member_ids:[...document.querySelectorAll('.gm:checked')].map(x=>+x.value)});closeModal();await loadChats();switchTab('chats')}catch(e){toast(e.message)}}
 async function settingsModal(){
-  const bl=await api('/blocked');let avatar=me.avatar;
+  const bl=await api('/blocked'),hist=await api('/calls').catch(()=>[]);let avatar=me.avatar;
   modal(`<h3>Settings</h3><div class="row" style="padding:0">${av(me.name,me.avatar)}<label class="no" style="padding:6px 10px;border-radius:8px;cursor:pointer">Change photo<input type="file" accept="image/*" hidden id="pfile"></label></div>
   <input id="pname" value="${esc(me.name)}" placeholder="Name"><input id="puser" value="${esc(me.username)}" placeholder="Username"><input id="pbio" value="${esc(me.bio)}" placeholder="Bio">
   <label class="row" style="padding:4px 0"><input type="checkbox" style="width:auto" id="pdark" ${document.body.classList.contains('dark')?'checked':''}> Dark mode</label>
   <button class="no" onclick="Notification.requestPermission().then(p=>toast('Notifications '+p))">🔔 Enable notifications</button>
   <b>Blocked users</b>${bl.map(u=>`<div class="row" style="padding:2px 0"><span class="grow">${esc(u.name)}</span><button class="no" onclick="unblockUser(${u.id})">Unblock</button></div>`).join('')||'<small class="sub">None</small>'}
+  <b>Recent calls</b>${callRows(hist)}
   <div class="actions"><button onclick="logout()">Log out</button><button class="primary" id="psave">Save</button></div>`);
   $('#pfile').onchange=async e=>{try{avatar=(await upload(e.target.files[0])).url;toast('Photo ready — press Save')}catch(x){toast(x.message)}};
   $('#pdark').onchange=e=>{document.body.classList.toggle('dark',e.target.checked);e.target.checked?localStorage.dark=1:localStorage.removeItem('dark')};
