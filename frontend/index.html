@@ -26,7 +26,7 @@
   <main id="chat">
     <div id="empty"><h2>💬</h2><p>Select a chat or add a friend to start talking</p></div>
     <div id="pane" hidden>
-      <header><button class="icon back" onclick="closeChat()">←</button><div id="head" class="row grow"></div></header>
+      <header><button class="icon back" onclick="closeChat()">←</button><div id="head" class="row grow"></div><div id="callBtns"><button class="icon" title="Voice call" onclick="startCall('audio')">📞</button><button class="icon" title="Video call" onclick="startCall('video')">🎥</button></div></header>
       <div id="msgs"></div>
       <footer>
         <label class="icon" title="Share photo, video or document">📎<input id="file" type="file" hidden onchange="pickFile(this)"></label>
@@ -38,5 +38,24 @@
   </main>
 </div>
 <div id="modal" class="modal" hidden onclick="if(event.target===this)closeModal()"><div class="card" id="modalBody"></div></div>
+<!-- Incoming call popup -->
+<div id="incoming" class="incoming" hidden><div class="card">
+  <div id="inAv"></div><b id="inName"></b><small id="inType" class="sub"></small>
+  <div class="actions"><button class="callbtn red" onclick="rejectCall()">✕ Reject</button><button class="callbtn green" onclick="acceptCall()">✓ Accept</button></div>
+</div></div>
+<!-- Call screen (audio + video) -->
+<div id="call" class="call" hidden>
+  <video id="remoteVid" autoplay playsinline></video>
+  <div class="top"><b id="callName"></b><span id="callTimer" hidden>00:00</span></div>
+  <div class="center"><div id="callAv"></div><div id="callStatus"></div></div>
+  <video id="localVid" autoplay playsinline muted></video>
+  <div class="controls">
+    <button id="btnMute" class="cbtn" title="Mute / unmute microphone" onclick="toggleMute()">🎤</button>
+    <button id="btnCam" class="cbtn" title="Camera on / off" onclick="toggleCam()">📷</button>
+    <button id="btnFlip" class="cbtn" title="Switch front / rear camera" onclick="flipCam()" hidden>🔄</button>
+    <button class="cbtn end" title="End call" onclick="endCall()">📵</button>
+  </div>
+</div>
 <script src="app.js"></script>
+<script src="calls.js"></script>
 </body></html>
