@@ -1,5 +1,5 @@
 """Friends Chat backend (FastAPI + WebSockets).  Run:  uvicorn main:app --reload"""
-import os, re, uuid, hashlib, hmac, secrets
+import os, re, uuid, hashlib, hmac, secrets, asyncio, base64, json, time
 from datetime import datetime, timedelta
 import jwt
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
@@ -60,7 +60,17 @@ class Message(Base):
     status = Column(String(10), default="sent")  # sent | delivered | read
     created = Column(DateTime, default=datetime.utcnow)
 
-Base.metadata.create_all(engine)
+class CallLog(Base):  # call history only - NO audio/video is ever stored
+    __tablename__ = "call_logs"
+    id = Column(Integer, primary_key=True)
+    caller_id = Column(Integer, ForeignKey("users.id"), index=True); receiver_id = Column(Integer, ForeignKey("users.id"), index=True)
+    call_type = Column(String(10))  # audio | video
+    status = Column(String(12), default="ringing")  # ringing | completed | missed | rejected | cancelled | failed
+    started = Column(DateTime, default=datetime.utcnow)
+    connected_at = Column(DateTime, nullable=True); ended = Column(DateTime, nullable=True)
+    duration = Column(Integer, default=0)  # seconds
+
+Base.metadata.create_all(engine)  # only creates MISSING tables, so your existing data is untouched
 
 # ---------- Security helpers ----------
 def get_secret():
@@ -258,6 +268,104 @@ async def upload(file: UploadFile = File(...), me=Depends(current_user)):
     kind = "image" if ct.startswith("image/") else "video" if ct.startswith("video/") else "audio" if ct.startswith("audio/") else "file"
     return dict(url="/uploads/" + name, kind=kind, name=file.filename or name)
 
+# ---------- Voice / video calls: WebRTC SIGNALING only (media goes browser-to-browser) ----------
+calls, in_call = {}, {}   # calls[call_id] = state dict;  in_call[user_id] = call_id (to know who is busy)
+RING_SECONDS, CONNECT_SECONDS = 45, 60
+
+@app.get("/api/ice")
+def ice_servers(me=Depends(current_user)):
+    """STUN/TURN settings for WebRTC. TURN secrets live in environment variables, never in frontend code."""
+    servers = [{"urls": [u.strip() for u in os.getenv("STUN_URLS", "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302").split(",") if u.strip()]}]
+    turn = [u.strip() for u in os.getenv("TURN_URLS", "").split(",") if u.strip()]
+    if turn:
+        secret = os.getenv("TURN_SECRET")  # option A: coturn "use-auth-secret" -> short-lived credentials
+        if secret:
+            username = f"{int(time.time()) + 3600}:{me.id}"
+            cred = base64.b64encode(hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()).decode()
+        else:  # option B: fixed username/credential from a TURN provider
+            username, cred = os.getenv("TURN_USERNAME", ""), os.getenv("TURN_CREDENTIAL", "")
+        servers.append({"urls": turn, "username": username, "credential": cred})
+    return {"iceServers": servers}
+
+@app.get("/api/calls")
+def call_history(me=Depends(current_user), db=Depends(get_db)):
+    rows = db.query(CallLog).filter(or_(CallLog.caller_id == me.id, CallLog.receiver_id == me.id)).order_by(CallLog.id.desc()).limit(10).all()
+    out = []
+    for r in rows:
+        peer = db.get(User, r.receiver_id if r.caller_id == me.id else r.caller_id)
+        out.append(dict(id=r.id, call_type=r.call_type, status=r.status, outgoing=r.caller_id == me.id, peer=peer.name if peer else "Deleted user",
+                        started=r.started.isoformat() + "Z", duration=r.duration or 0))
+    return out
+
+async def end_call(db, cid, reason, by=None):
+    """Close a call: free both users, save history, tell the other person. `by` = who ended it (not notified)."""
+    c = calls.pop(cid, None)
+    if not c: return
+    for u in (c["caller"], c["callee"]): in_call.pop(u, None)
+    t = c.get("task")
+    if t and t is not asyncio.current_task(): t.cancel()
+    now, connected = datetime.utcnow(), c["connected_at"] is not None
+    if reason in ("rejected", "missed", "cancelled"): status = reason
+    elif connected: status = "completed"
+    else: status = "cancelled" if reason == "ended" else "failed"
+    log = db.get(CallLog, c["log_id"])
+    if log:
+        log.status, log.ended, log.connected_at = status, now, c["connected_at"]
+        log.duration = int((now - c["connected_at"]).total_seconds()) if connected else 0
+        db.commit()
+    for u in (c["caller"], c["callee"]):
+        if u != by: await mgr.send(u, {"type": "call_ended", "call_id": cid, "reason": reason})
+
+async def call_watchdog(cid, seconds, state, reason):
+    """Safety net: if a call is stuck (nobody answers / never connects) close it so nobody stays 'busy' forever."""
+    await asyncio.sleep(seconds)
+    c = calls.get(cid)
+    if c and c["state"] == state:
+        db = SessionLocal()
+        try: await end_call(db, cid, reason)
+        finally: db.close()
+
+async def handle_call(db, uid, data):
+    t = data.get("type")
+    if t == "call_invite":
+        to, ctype = data.get("to"), data.get("call_type")
+        async def fail(why): await mgr.send(uid, {"type": "call_failed", "reason": why})
+        if ctype not in ("audio", "video") or not isinstance(to, int) or to == uid or not db.get(User, to): return await fail("invalid")
+        f = find_friendship(db, uid, to)
+        if not f or f.status != "accepted": return await fail("not_friends")     # only friends can call
+        if is_blocked(db, uid, to): return await fail("blocked")
+        if uid in in_call or to in in_call: return await fail("busy")
+        if not mgr.online(to):
+            db.add(CallLog(caller_id=uid, receiver_id=to, call_type=ctype, status="missed", ended=datetime.utcnow(), duration=0)); db.commit()
+            return await fail("offline")
+        log = CallLog(caller_id=uid, receiver_id=to, call_type=ctype); db.add(log); db.commit()
+        cid = uuid.uuid4().hex
+        calls[cid] = dict(caller=uid, callee=to, type=ctype, state="ringing", log_id=log.id, connected_at=None,
+                          task=asyncio.create_task(call_watchdog(cid, RING_SECONDS, "ringing", "missed")))
+        in_call[uid] = in_call[to] = cid
+        await mgr.send(uid, {"type": "call_ringing", "call_id": cid})
+        await mgr.send(to, {"type": "call_incoming", "call_id": cid, "call_type": ctype, "user": user_out(db.get(User, uid))})
+        return
+    cid = data.get("call_id"); c = calls.get(cid)
+    if not c or uid not in (c["caller"], c["callee"]): return          # unknown call or not a participant -> ignore
+    other = c["callee"] if uid == c["caller"] else c["caller"]
+    if t == "call_accept" and uid == c["callee"] and c["state"] == "ringing":
+        c["state"] = "connecting"
+        if c.get("task"): c["task"].cancel()
+        c["task"] = asyncio.create_task(call_watchdog(cid, CONNECT_SECONDS, "connecting", "failed"))
+        await mgr.send(other, {"type": "call_accepted", "call_id": cid})
+    elif t == "call_reject" and uid == c["callee"] and c["state"] == "ringing":
+        await end_call(db, cid, "rejected", by=uid)
+    elif t == "call_end":
+        await end_call(db, cid, "cancelled" if c["state"] == "ringing" else "ended", by=uid)
+    elif t == "call_connected" and c["state"] == "connecting":
+        c["state"] = "connected"; c["connected_at"] = datetime.utcnow()
+        if c.get("task"): c["task"].cancel()
+    elif t == "call_signal" and c["state"] in ("connecting", "connected"):
+        sig = data.get("data")
+        if isinstance(sig, dict) and len(json.dumps(sig)) < 20000:       # forward offer / answer / ICE to the other person only
+            await mgr.send(other, {"type": "call_signal", "call_id": cid, "data": sig})
+
 # ---------- WebSocket (real-time) ----------
 async def broadcast_presence(db, user):
     for fid in friend_ids(db, user.id): await mgr.send(fid, {"type": "presence", "user": user_out(user)})
@@ -310,7 +418,7 @@ async def ws_endpoint(ws: WebSocket, token: str):
     try:
         while True:
             data = await ws.receive_json()
-            try: await handle_ws(db, uid, data)
+            try: await (handle_call(db, uid, data) if str(data.get("type", "")).startswith("call_") else handle_ws(db, uid, data))
             except WebSocketDisconnect: raise
             except Exception: db.rollback()
     except Exception: pass
@@ -318,6 +426,7 @@ async def ws_endpoint(ws: WebSocket, token: str):
         mgr.conns[uid].discard(ws)
         if not mgr.conns[uid]:
             user = db.get(User, uid); user.online = False; user.last_seen = datetime.utcnow(); db.commit()
+            if uid in in_call: await end_call(db, in_call[uid], "disconnected", by=uid)  # hang up if the user vanished
             await broadcast_presence(db, user)
         db.close()
 
