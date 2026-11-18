@@ -10,6 +10,13 @@ services:
         value: 3.12.3
       - key: SECRET_KEY
         generateValue: true
+      # --- Voice/video calls: TURN relay (see README). Set the values in the Render dashboard. ---
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: friends-chat-db
