@@ -2,12 +2,14 @@
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Friends Chat</title><link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="settings.css">
 </head><body>
 <section id="auth"><div class="card">
   <h1>💬 Friends Chat</h1><p class="sub">Chat with your friends in real time</p>
   <div class="tabs"><button id="tabLogin" class="on" onclick="setAuth('login')">Log in</button><button id="tabReg" onclick="setAuth('reg')">Sign up</button></div>
   <form id="loginForm" onsubmit="submitAuth(event,'login')">
     <input name="email" type="email" placeholder="Email" required><input name="password" type="password" placeholder="Password" required>
+    <input name="code" id="loginCode" placeholder="6-digit authenticator code" inputmode="numeric" autocomplete="one-time-code" hidden>
     <button class="primary">Log in</button></form>
   <form id="regForm" hidden onsubmit="submitAuth(event,'reg')">
     <input name="name" placeholder="Full name" required><input name="email" type="email" placeholder="Email" required>
@@ -17,8 +19,8 @@
 
 <div id="app" hidden>
   <aside id="side">
-    <header><div id="me" onclick="settingsModal()"></div><div class="grow"></div>
-      <button class="icon" title="New group" onclick="groupModal()">👥</button><button class="icon" title="Settings" onclick="settingsModal()">⚙️</button></header>
+    <header><div id="me" onclick="openSettings()" role="button" tabindex="0" onkeydown="if(event.key==='Enter')openSettings()"></div><div class="grow"></div>
+      <button class="icon" title="New group" onclick="groupModal()">👥</button><button class="icon" title="Settings" onclick="openSettings()">⚙️</button></header>
     <nav class="tabs"><button id="t-chats" class="on" onclick="switchTab('chats')">Chats</button><button id="t-friends" onclick="switchTab('friends')">Friends</button><button id="t-find" onclick="switchTab('find')">Find</button></nav>
     <input id="searchBox" hidden placeholder="Search by name or @username" oninput="searchUsers(this.value)">
     <div id="list"></div>
@@ -26,11 +28,11 @@
   <main id="chat">
     <div id="empty"><h2>💬</h2><p>Select a chat or add a friend to start talking</p></div>
     <div id="pane" hidden>
-      <header><button class="icon back" onclick="closeChat()">←</button><div id="head" class="row grow"></div><div id="callBtns"><button class="icon" title="Voice call" onclick="startCall('audio')">📞</button><button class="icon" title="Video call" onclick="startCall('video')">🎥</button></div></header>
+      <header><button class="icon back" onclick="closeChat()">←</button><div id="head" class="row grow"></div><div id="callBtns"><button class="icon" title="Voice call" onclick="startCall('audio')">📞</button><button class="icon" title="Video call" onclick="startCall('video')">🎥</button><button class="icon" id="chatMenuBtn" title="Chat options" onclick="chatMenu()">⋮</button></div></header>
       <div id="msgs"></div>
       <footer>
         <label class="icon" title="Share photo, video or document">📎<input id="file" type="file" hidden onchange="pickFile(this)"></label>
-        <input id="text" placeholder="Type a message" autocomplete="off" oninput="toggleBtns()" onkeydown="if(event.key==='Enter')sendText()">
+        <textarea id="text" rows="1" placeholder="Type a message" aria-label="Message" autocomplete="off" oninput="toggleBtns()" onkeydown="onTextKey(event)"></textarea>
         <button id="send" class="primary round" hidden onclick="sendText()">➤</button>
         <button id="mic" class="primary round" title="Record voice message" onclick="toggleRec()">🎤</button>
       </footer>
@@ -58,4 +60,5 @@
 </div>
 <script src="app.js"></script>
 <script src="calls.js"></script>
+<script src="settings.js"></script>
 </body></html>
