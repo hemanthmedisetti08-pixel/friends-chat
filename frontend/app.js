@@ -10,19 +10,19 @@ async function api(p,m='GET',b){
   if(!r.ok){if(r.status===401&&token)logout();throw new Error(typeof d.detail==='string'?d.detail:'Please check your input')}
   return d;
 }
-function toast(t){const e=document.createElement('div');e.className='toast';e.textContent=t;document.body.append(e);setTimeout(()=>e.remove(),3000)}
+function toast(t){const e=document.createElement('div');e.className='toast';e.setAttribute('role','status');e.textContent=t;document.body.append(e);setTimeout(()=>e.remove(),3000)}
 const av=(name,img,on)=>`<div class="av">${img?`<img src="${esc(img)}">`:esc((name||'?')[0].toUpperCase())}${on?'<i class="dot"></i>':''}</div>`;
 const preview=m=>m.kind==='text'?m.body:{image:'📷 Photo',video:'🎬 Video',audio:'🎤 Voice message',file:'📄 Document'}[m.kind];
 const cur=()=>chats.find(c=>c.id===active);
 
 // ---------- Auth ----------
 function setAuth(m){$('#loginForm').hidden=m!=='login';$('#regForm').hidden=m!=='reg';$('#tabLogin').classList.toggle('on',m==='login');$('#tabReg').classList.toggle('on',m==='reg')}
-async function submitAuth(e,mode){e.preventDefault();try{const d=await api(mode==='login'?'/login':'/register','POST',Object.fromEntries(new FormData(e.target)));token=d.token;localStorage.token=token;start()}catch(x){toast(x.message)}}
-function logout(){localStorage.removeItem('token');token=null;ws&&ws.close();location.reload()}
+async function submitAuth(e,mode){e.preventDefault();try{const d=await api(mode==='login'?'/login':'/register','POST',Object.fromEntries(new FormData(e.target)));token=d.token;localStorage.token=token;start()}catch(x){if(x.message==='2FA_REQUIRED'){$('#loginCode').hidden=false;$('#loginCode').focus();toast('Enter the 6-digit code from your authenticator app')}else toast(x.message)}}
+function logout(){const t=token;if(t)fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+t},keepalive:true}).catch(()=>{});localStorage.removeItem('token');localStorage.removeItem('fc_settings');token=null;ws&&ws.close();setTimeout(()=>location.reload(),200)}
 async function start(){
   try{me=await api('/me')}catch{return}
   $('#auth').hidden=true;$('#app').hidden=false;renderMe();
-  await Promise.all([loadChats(),loadFriends()]);connect();
+  await Promise.all([loadSettings(),loadChats(),loadFriends()]);connect();
 }
 const renderMe=()=>$('#me').innerHTML=`<div class="row" style="padding:0">${av(me.name,me.avatar)}<b>${esc(me.name)}</b></div>`;
 
@@ -33,7 +33,7 @@ function switchTab(t){tab=t;['chats','friends','find'].forEach(x=>$('#t-'+x).cla
 function searchUsers(q){clearTimeout(timer);timer=setTimeout(async()=>{results=await api('/users/search?q='+encodeURIComponent(q)).catch(()=>[]);renderList()},300)}
 function renderList(){
   const L=$('#list');
-  if(tab==='chats')L.innerHTML=chats.map(c=>`<div class="row ${active===c.id?'sel':''}" onclick="openChat(${c.id})">${av(c.name,c.avatar,c.other?.online)}<div class="grow"><b>${esc(c.is_group?'👥 '+c.name:c.name)}</b><small>${c.last?esc(preview(c.last)):'No messages yet'}</small></div>${c.unread?`<span class="badge">${c.unread}</span>`:''}</div>`).join('')||'<p class="empty">No chats yet. Use the Find tab to add friends!</p>';
+  if(tab==='chats')L.innerHTML=chatListHTML();   // settings.js: archive, mute, preview, typing
   else if(tab==='friends')L.innerHTML=(requests.length?'<h4>Friend requests</h4>':'')+requests.map(r=>`<div class="row">${av(r.user.name,r.user.avatar)}<div class="grow"><b>${esc(r.user.name)}</b><small>@${esc(r.user.username)}</small></div><button class="ok" onclick="respond(${r.id},true)">✓</button><button class="no" onclick="respond(${r.id},false)">✕</button></div>`).join('')+`<h4>Friends (${friends.length})</h4>`+friends.map(f=>`<div class="row" onclick="chatWith(${f.id})">${av(f.name,f.avatar,f.online)}<div class="grow"><b>${esc(f.name)}</b><small>${esc(f.bio||'@'+f.username)}</small></div><button class="no" onclick="event.stopPropagation();blockUser(${f.id})">Block</button></div>`).join('');
   else L.innerHTML=results.map(u=>`<div class="row">${av(u.name,u.avatar,u.online)}<div class="grow"><b>${esc(u.name)}</b><small>@${esc(u.username)}</small></div>${{none:`<button class="ok" onclick="addFriend(${u.id})">Add</button>`,sent:'<small>Pending</small>',received:'<small>Check Friends tab</small>',friend:'<small>Friends ✓</small>'}[u.relation]}</div>`).join('')||'<p class="empty">Type at least 2 letters to find people</p>';
 }
@@ -49,16 +49,16 @@ function openChat(id){
 }
 function closeChat(){active=null;document.body.classList.remove('chat-open');renderList()}
 function renderHead(){const c=cur();if(!c)return;const o=c.other;$('#callBtns').hidden=c.is_group;
-  $('#head').innerHTML=`${av(c.name,c.avatar,o?.online)}<div><b>${esc(c.name)}</b><small>${c.is_group?c.members.map(m=>esc(m.name)).join(', '):o?.online?'online':'last seen '+new Date(o.last_seen).toLocaleString([],{dateStyle:'short',timeStyle:'short'})}</small></div>`}
+  $('#head').innerHTML=`${av(c.name,c.avatar,o?.online)}<div><b>${esc(c.name)}</b><small>${headStatus(c)}</small></div>`}
 function msgHTML(m,c){
   const mine=m.sender_id===me.id,s=c.members.find(u=>u.id===m.sender_id),u=esc(m.file_url);
-  let b={image:`<img src="${u}" onclick="window.open(this.src)">`,video:`<video src="${u}" controls></video>`,audio:`<audio src="${u}" controls></audio>`,file:`<a href="${u}" download="${esc(m.file_name)}">📄 ${esc(m.file_name||'Document')}</a>`}[m.kind]||'';
+  let b=mediaHTML(m);   // settings.js: respects auto-download settings
   if(m.body)b+=`<div>${esc(m.body)}</div>`;
   return `<div class="msg ${mine?'me':'them'}">${c.is_group&&!mine?`<b class="who">${esc(s?.name||'')}</b>`:''}${b}<span class="meta">${time(m.created)} ${mine?`<span class="tick ${m.status}">${m.status==='sent'?'✓':'✓✓'}</span>`:''}</span></div>`}
 function renderMsgs(){const c=cur(),box=$('#msgs');if(!c)return;box.innerHTML=(msgs[c.id]||[]).map(m=>msgHTML(m,c)).join('');box.scrollTop=box.scrollHeight}
 const wsSend=o=>ws&&ws.readyState===1?ws.send(JSON.stringify(o)):toast('Reconnecting… try again');
 const markRead=()=>active&&wsSend({type:'read',chat_id:active});
-const toggleBtns=()=>{const t=$('#text').value.trim();$('#send').hidden=!t;$('#mic').hidden=!!t};
+const toggleBtns=()=>{const t=$('#text').value.trim();$('#send').hidden=!t;$('#mic').hidden=!!t;onTextChange()};
 function sendText(){const b=$('#text').value.trim();if(!b||!active)return;wsSend({type:'message',chat_id:active,kind:'text',body:b});$('#text').value='';toggleBtns()}
 async function upload(file){const fd=new FormData();fd.append('file',file);const r=await fetch('/api/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const d=await r.json();if(!r.ok)throw new Error(d.detail);return d}
 async function sendFile(file){try{const d=await upload(file);wsSend({type:'message',chat_id:active,kind:d.kind,file_url:d.url,file_name:d.name})}catch(e){toast(e.message)}}
@@ -74,9 +74,10 @@ async function toggleRec(){
 function connect(){
   ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?token=${token}`);
   ws.onmessage=e=>handle(JSON.parse(e.data));
-  ws.onclose=()=>{onSocketClosed();if(token)setTimeout(connect,2000)};
+  ws.onclose=e=>{onSocketClosed();if(e.code===4401){if(token)logout();return}if(token)setTimeout(connect,2000)};
 }
 async function handle(d){
+  if(handleExtra(d))return;   // settings.js: typing, security alerts, media deleted
   if(String(d.type).startsWith('call_'))return handleCall(d);   // calling events live in calls.js
   if(d.type==='message'){
     const m=d.message;let c=chats.find(c=>c.id===m.chat_id);
@@ -96,9 +97,7 @@ async function handle(d){
   else if(d.type==='chat_created'){toast('You were added to a group');loadChats()}
   else if(d.type==='error')toast(d.detail);
 }
-function notify(c,m){
-  if('Notification' in window&&Notification.permission==='granted')new Notification(c.name,{body:preview(m)});
-}
+function notify(c,m){notifyMsg(c,m)}   // settings.js: mute, sound, preview, desktop, vibration
 
 // ---------- Modals: groups & settings ----------
 const modal=h=>{$('#modalBody').innerHTML=h;$('#modal').hidden=false};
@@ -120,4 +119,4 @@ async function settingsModal(){
 }
 async function unblockUser(id){await api('/unblock','POST',{user_id:id});settingsModal()}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)markRead()});
-if(token)start();
+addEventListener('load',()=>{if(token)start()});   // wait until all scripts are loaded
