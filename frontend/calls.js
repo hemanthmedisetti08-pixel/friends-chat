@@ -60,8 +60,8 @@ function onIncoming(d){
   call={id:d.call_id,peer:d.user,type:d.call_type,role:'callee',accepted:false};
   $c('inAv').innerHTML=av(d.user.name,d.user.avatar);$c('inName').textContent=d.user.name;
   $c('inType').textContent='Incoming '+(d.call_type==='video'?'video':'voice')+' call…';
-  $c('incoming').hidden=false;ring(true);
-  if(document.hidden&&'Notification' in window&&Notification.permission==='granted')new Notification(d.user.name,{body:'Incoming '+d.call_type+' call'});
+  $c('incoming').hidden=false;ring(callAlerts());if(callAlerts()&&S.notif.vibrate&&navigator.vibrate)navigator.vibrate([300,150,300]);
+  if(callAlerts()&&document.hidden&&'Notification' in window&&Notification.permission==='granted')new Notification(d.user.name,{body:'Incoming '+d.call_type+' call'});
 }
 async function acceptCall(){
   const cl=call;if(!cl||cl.accepted)return;
