@@ -86,3 +86,90 @@ With Metered: create an account → create a TURN app → copy the server URLs, 
 6. Real-world test: put one device on mobile data and the other on Wi-Fi. If it never connects, check your TURN variables.
 
 Limits: one call per user at a time; group calls are not supported; on Render's free plan the first load after sleep is slow.
+
+---
+# ⚙️ Settings (added in v1.3.0)
+
+A full Settings page (⚙️ in the sidebar, or tap your name). Ten sections: Account, Privacy, Security, Chats, Notifications, Storage and data, Profile, Linked devices, Accessibility, Help and support, plus search. Every control reads and writes real data on the server.
+
+## Folder structure
+```
+friends-chat/
+├── backend/
+│   ├── main.py            ← replace (sessions, privacy rules, 2FA login, typing, read receipts)
+│   └── settings_api.py    ← NEW (all settings / account / security / storage endpoints)
+├── frontend/
+│   ├── index.html         ← replace
+│   ├── app.js             ← replace (small hooks)
+│   ├── calls.js           ← replace (call alerts follow notification settings)
+│   ├── settings.js        ← NEW (Settings page)
+│   ├── settings.css       ← NEW (Settings styles)
+│   └── style.css          ← unchanged
+├── render.yaml            ← replace
+└── README.md
+```
+
+## Database changes / migration
+Nothing to run by hand. On start, `create_all` adds **3 new tables** and does not touch existing ones, so PostgreSQL on Render keeps all data:
+| Table | Purpose |
+|---|---|
+| `user_settings` | one row per user: all preferences as JSON (incl. per-chat archive/mute/clear) + two-step secret |
+| `login_sessions` | one row per logged-in device (real session list, revocable) |
+| `support_reports` | messages from "Contact support" / "Report a problem" |
+
+**One-time effect:** old login tokens have no session id, so everyone is asked to log in once after this update.
+Read support messages in the Render database shell: `SELECT * FROM support_reports ORDER BY id DESC;`
+
+## What each setting really does
+- **Privacy** (last seen, online, photo, about; Everyone / My contacts / My contacts except… / Nobody): enforced on the server in every response that contains another user's profile (chats, friends, search, presence, calls). **Read receipts off**: your reads never turn the sender's ticks blue. **Typing indicators**: the server only relays "typing…" if both people allow it.
+- **Security**: real TOTP two-step verification (Google/Microsoft Authenticator, Authy), required at login. Every login creates a session; logging a device out revokes its token and closes its WebSocket at once. Security alerts arrive live on your other devices.
+- **Chats**: theme, wallpaper, font size, Enter-sends, list preview, media auto-download, archive, per-user clear/delete, JSON backup download.
+- **Notifications**: message/group/call switches, sound choice, preview, desktop notifications + browser permission, vibration (if supported), per-chat mute (8 h / 1 week / always).
+- **Storage and data**: real file sizes from the server disk (photos/videos/audio/documents), delete your own media, bulk cleanup. Websites cannot measure network usage; the page shows what the browser reports.
+- **Account**: change email/phone/password (password required), download account data, delete account (password + typing DELETE (+ 2FA code)). Deleting removes the user, messages, uploaded files, friendships, call history, sessions and settings; 1-to-1 chats disappear for the friend too.
+- **Accessibility**: UI font size 80–150%, high contrast, reduce animations, keyboard focus outlines, ARIA labels.
+
+## API endpoints (all need `Authorization: Bearer <token>` except login/register/app-info)
+| Method & path | What it does |
+|---|---|
+| `GET /api/settings` | all settings (defaults + saved) |
+| `PATCH /api/settings` `{"values":{"privacy.last_seen":"nobody"}}` | validated update of one or more settings |
+| `POST /api/settings/reset-privacy` | back to default privacy |
+| `GET /api/profile/preview` | how contacts / everyone see your profile |
+| `PUT /api/chats/{id}/prefs` `{archived, muted_until}` | archive / mute a chat |
+| `POST /api/chats/{id}/clear` · `/delete` | clear / delete a chat for you only |
+| `GET /api/chats/export?chat_id=` | JSON chat backup |
+| `GET /api/account` | account info |
+| `PUT /api/account/email` · `/phone` · `POST /api/account/password` | change (current password required) |
+| `GET /api/account/export` | download account information |
+| `POST /api/account/delete` `{password, confirm:"DELETE", code}` | permanent deletion |
+| `GET /api/security/2fa` · `POST /2fa/setup` · `/2fa/enable` · `/2fa/disable` | two-step verification |
+| `GET /api/sessions` · `DELETE /api/sessions/{id}` · `POST /api/sessions/revoke-others` · `POST /api/logout` | devices / sessions |
+| `GET /api/storage` · `DELETE /api/media/{id}` · `POST /api/media/cleanup` | storage dashboard and cleanup |
+| `POST /api/support` `{kind:"support"|"problem", message}` | save a support message |
+| `GET /api/app-info` | version and support email |
+Existing: `/api/login` now also accepts `code` (2FA).
+
+## Render deployment
+1. Replace/add the files above in your GitHub repo and push. Render redeploys.
+2. Optional environment variables: `SUPPORT_EMAIL` (shown in Help), `APP_VERSION`. Existing `DATABASE_URL`, `SECRET_KEY`, `TURN_*` stay as they are.
+3. Open the site once, log in again.
+
+## Testing every setting (use two accounts, A and B, as friends)
+1. **Privacy:** A sets *Last seen* = Nobody and *Profile photo* = My contacts except B → B opens A's chat: no last seen, no photo. Reset with *Default privacy settings*.
+2. **Receipts/typing:** A turns *Read receipts* off, B sends a message, A opens it → B's tick stays grey. Turn *Typing indicators* off → no "typing…".
+3. **Security:** A: Security › Set up, scan/enter the key, enter the code. Log out, log in → code requested. Log in on a second browser, then *Log out from other devices* → the other browser is logged out at once.
+4. **Devices:** Linked devices lists both browsers with names and last-active time; log one out.
+5. **Chats:** change theme/wallpaper/font size; with *Enter sends* off Enter adds a line; archive, mute, clear, delete a chat; download a backup.
+6. **Notifications:** allow browser permission, send a message from B while A is in another chat or tab: sound + pop-up. Mute the chat → silent. Test sound button.
+7. **Storage:** send a photo/video, open Storage and data: sizes shown; delete it; try bulk cleanup. Set Mobile data video off + Data saver on → videos show "tap to download".
+8. **Profile:** change photo, name, about → Save; Cancel discards; Preview shows both views.
+9. **Account:** change email/phone/password (wrong password is refused); download account info; delete a throw-away account.
+10. **Accessibility:** font slider, high contrast, reduce animations; Tab through the page; Esc closes windows.
+11. **Help:** FAQ, Report a problem → appears in `support_reports`.
+
+## Things that need extra setup or are not included
+- **Phone-number change** is not verified (needs an SMS provider). **Email verification / password reset by email** need an email service.
+- **Status privacy:** the app has no Status/Stories feature, so no option is shown.
+- **Free Render plan:** uploaded files vanish on redeploy; the storage page reports such files as missing. Use a Render Disk or cloud storage for permanent media.
+- Privacy policy and terms are templates; have them reviewed before going public.
