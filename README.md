@@ -173,3 +173,85 @@ Existing: `/api/login` now also accepts `code` (2FA).
 - **Status privacy:** the app has no Status/Stories feature, so no option is shown.
 - **Free Render plan:** uploaded files vanish on redeploy; the storage page reports such files as missing. Use a Render Disk or cloud storage for permanent media.
 - Privacy policy and terms are templates; have them reviewed before going public.
+
+---
+# 🚫👥↩️ Block/Unblock, Group management, Group calls, Back navigation (v1.4.0)
+
+## Folder structure
+```
+friends-chat/
+├── backend/
+│   ├── main.py            ← replace  (block rules, group_info table, group fields, group-call hooks)
+│   ├── settings_api.py    ← replace  (app-info now reports if group calls are configured)
+│   └── groups_api.py      ← NEW      (groups, members, admins, exit, delete, profiles, group-call signaling)
+├── frontend/
+│   ├── index.html, app.js, calls.js, settings.js  ← replace
+│   ├── nav.js             ← NEW (History API router: Back / Android Back)
+│   ├── groups.js          ← NEW (profile page, group info, block/unblock)
+│   ├── gcall.js           ← NEW (group call screen)
+│   ├── groups.css         ← NEW
+│   └── settings.css, style.css  ← unchanged
+├── render.yaml, README.md ← replace
+```
+
+## Database
+One new table, created automatically on start (existing tables are not changed, nothing to migrate by hand):
+`group_info(chat_id, description, avatar, created, owner_id, admins, edit_info, add_members)`.
+Groups that existed before this update get their row the first time they are opened: the **earliest member becomes the owner** and the creation date shows as "unknown".
+Group system messages ("X left", "X added Y") are normal rows in `messages` with `kind = 'system'`.
+
+## Environment variables (Render → Environment)
+| Variable | Needed for |
+|---|---|
+| `LIVEKIT_URL` | Group calls: your LiveKit address, e.g. `wss://your-project.livekit.cloud` |
+| `LIVEKIT_API_KEY` | Group calls: key of your LiveKit project |
+| `LIVEKIT_API_SECRET` | Group calls: secret of your LiveKit project (keep private) |
+Without these three, everything else works; group call buttons explain that a media server is missing. Existing `TURN_*`, `SUPPORT_EMAIL` etc. stay.
+
+## Why group calls need extra infrastructure (SFU)
+In a one-to-one call each browser sends video straight to the other. In a group of N people that means every browser would upload its video N-1 times, which collapses at about 4 people. An **SFU** (Selective Forwarding Unit) fixes this: each person uploads once to a media server, and the server forwards streams to the others.
+Render web services only carry HTTP/WebSocket traffic and cannot run an SFU (it needs open UDP ports). So this project uses **LiveKit**, an open-source SFU:
+1. Create a LiveKit project (LiveKit Cloud has a free tier; check its current limits) or self-host LiveKit on a VPS with open UDP ports.
+2. Copy the project's WebSocket URL, API key and API secret into the 3 Render variables and redeploy.
+3. How it works here: members tap the group call button → the Friends Chat server checks membership and sends a short-lived LiveKit join token over the existing WebSocket → the browser connects to LiveKit with the LiveKit JavaScript library (loaded from the jsDelivr CDN). **Audio/video never passes through FastAPI.**
+Limit: a person removed from a group mid-call stays connected until their token ends (2 hours) because ending a LiveKit session from our server needs LiveKit's admin API, which is not wired up. They can no longer join new calls.
+
+## Back navigation
+Every screen has an address: `#/chat/5`, `#/settings`, `#/settings/privacy`, `#/profile/7`, `#/group/5`, `#/group/5/add`.
+Opening a screen pushes a history entry (`pushState`); the browser Back button, Android Back and every ← button go to the previous screen (`popstate`). Examples: Settings → Privacy → Back = Settings → Back = Chats. Chat → friend profile → Back = that chat. Group → Group info → member profile → Back = Group info → Back = group chat.
+Back also closes an open pop-up first, and does not leave a running call (it shows "Use End call"). Opening a link like `#/settings/privacy` builds the history so Back climbs one level at a time; if there is no earlier entry the ← button goes to the logical parent screen. Logout clears the address.
+
+## API (all need `Authorization: Bearer <token>`)
+| Method & path | Purpose |
+|---|---|
+| `POST /api/block` `{user_id}` · `POST /api/unblock` | block / unblock (one-way; also cancels pending requests and any running call) |
+| `GET /api/blocked` | my blocked users |
+| `GET /api/users/{id}` | profile (only friends, requests, or people sharing a group) |
+| `GET /api/groups/{id}` | group info, members, roles, my permissions, call state |
+| `PUT /api/groups/{id}` `{name, description, avatar}` | edit (admins, or everyone if allowed) |
+| `PUT /api/groups/{id}/permissions` `{edit_info, add_members}` | `"admins"` or `"all"` (admins only) |
+| `POST /api/groups/{id}/members` `{user_ids}` | add your own friends |
+| `DELETE /api/groups/{id}/members/{uid}` | remove a member (admins; only the owner removes admins) |
+| `POST /api/groups/{id}/admins` `{user_id, admin}` | promote / demote |
+| `POST /api/groups/{id}/leave` | **Exit group** (only me) |
+| `DELETE /api/groups/{id}` | **Delete group** for everyone (admins/owner) |
+| WebSocket `gcall_start` / `gcall_join` / `gcall_leave` `{chat_id}` | group-call signaling; server answers `gcall_token`, `gcall_state`, `gcall_ring`, `gcall_error` |
+| WebSocket events from server | `group_updated`, `group_removed` (`reason`: removed / left / deleted) |
+Blocking is enforced on the server: messages, calls, friend requests and accepting requests are refused for a blocked pair, and a blocker's photo/about/online/last-seen are hidden from the blocked person. Blocking in a group chat does not stop group messages.
+
+## Test checklist (accounts A, B, C; A and B and C are friends)
+1. **Block:** A opens B's profile (tap B's name in the chat) → Block → confirm → button shows Unblock; the chat shows a "You blocked B" bar. Check Settings › Privacy › Blocked contacts lists B.
+2. **Blocked sends:** B writes to A → B sees "You can't send messages to this contact"; A receives nothing. B calls A → "You cannot call this user". B sends A a friend request (after unfriending) → refused.
+3. **Unblock:** A taps Unblock (confirm). Messaging and calls work again; B was never blocked by A's block of B in the other direction (A can unblock without B doing anything).
+4. **Groups:** A creates a group with B and C → open the group → ℹ️ Group info. Edit name/description/photo, add a member, make B admin, remove C, set "who can add members" = All.
+5. **Group voice call** (needs LiveKit): A taps 📞 → B and C get a Join popup → join, mute/unmute, see participant names and count, Leave. Last person leaving ends the call (a system message shows the duration).
+6. **Group video call:** same with 🎥: tiles with names, camera on/off, speaking highlight.
+7. **Exit group:** C → Exit group → confirm → C no longer sees the group or new messages; others see "C left".
+8. **Delete group:** B (admin) → Delete group → confirm → everyone loses the group; opening `#/group/ID` shows nothing. A normal member sees the Delete option disabled with the reason.
+9. **Back:** Chats → Settings → Privacy → Back, Back lands on Chats; Chat → profile → Back; Group → Group info → member → Back, Back; press Android Back with a pop-up open (closes it), during a call (stays), and after pasting a `#/settings/privacy` link.
+10. Repeat on desktop and an Android phone.
+
+## Render deployment
+1. Upload the changed/new files to GitHub and push; Render redeploys and creates the `group_info` table.
+2. For group calls add the three `LIVEKIT_*` variables, then redeploy.
+3. Open the site over `https://` (needed for camera/microphone).
