@@ -42,7 +42,8 @@ function showEnded(text){
 
 /* ---- starting a call (caller) ---- */
 async function startCall(type){
-  const c=cur();if(!c||c.is_group||!c.other)return;
+  const c=cur();if(c&&c.is_group)return startGroupCall(type);if(!c||!c.other)return;
+  if(c.blocked_by_me)return toast('Unblock this contact to call them');
   if(call)return toast('You are already in a call');
   if(!ws||ws.readyState!==1)return toast('Connecting to server… try again in a moment');
   let local;
