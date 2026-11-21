@@ -91,6 +91,16 @@ class SupportReport(Base):  # "Contact support" / "Report a problem" messages
     message = Column(Text); user_agent = Column(String(200), default="")
     created = Column(DateTime, default=datetime.utcnow); status = Column(String(10), default="open")
 
+class GroupInfo(Base):  # description, photo, owner, admins and rules for a group chat
+    __tablename__ = "group_info"
+    chat_id = Column(Integer, ForeignKey("chats.id"), primary_key=True)
+    description = Column(String(300), default=""); avatar = Column(String(200), default="")
+    created = Column(DateTime, nullable=True)            # empty for groups made before this update
+    owner_id = Column(Integer, ForeignKey("users.id"))
+    admins = Column(Text, default="[]")                  # JSON list of user ids (the owner is always an admin)
+    edit_info = Column(String(10), default="admins")     # who may edit name/photo/description: admins | all
+    add_members = Column(String(10), default="admins")   # who may add members: admins | all
+
 Base.metadata.create_all(engine)  # only creates MISSING tables, so your existing data is untouched
 
 # ---------- Security helpers ----------
@@ -164,6 +174,7 @@ def user_out(u, viewer=None):
         if not allowed(s, "about", contact, viewer): d["bio"] = ""
         if not allowed(s, "online", contact, viewer): d["online"] = False
         if not allowed(s, "last_seen", contact, viewer): d["last_seen"] = None
+        if db.query(Block).filter_by(user_id=u.id, blocked_id=viewer).first(): d.update(avatar="", bio="", online=False, last_seen=None)
     return d
 
 # ----- two-step verification (TOTP, RFC 6238; works with Google Authenticator, Microsoft Authenticator, Authy...) -----
@@ -293,6 +304,7 @@ def requests_in(me=Depends(current_user), db=Depends(get_db)):
 async def respond(b: RespondIn, me=Depends(current_user), db=Depends(get_db)):
     f = db.get(Friendship, b.request_id)
     if not f or f.to_id != me.id or f.status != "pending": raise HTTPException(404, "Request not found")
+    if b.accept and is_blocked(db, f.from_id, me.id): raise HTTPException(403, "You can't accept this request")
     if b.accept:
         f.status = "accepted"
         chat = Chat(is_group=False); db.add(chat); db.flush()
@@ -308,14 +320,23 @@ def friends(me=Depends(current_user), db=Depends(get_db)):
     return [user_out(db.get(User, i), me.id) for i in friend_ids(db, me.id)]
 
 @app.post("/api/block")
-def block(b: IdIn, me=Depends(current_user), db=Depends(get_db)):
-    if not db.query(Block).filter_by(user_id=me.id, blocked_id=b.user_id).first():
-        db.add(Block(user_id=me.id, blocked_id=b.user_id)); db.commit()
-    return {"ok": True}
+async def block(b: IdIn, me=Depends(current_user), db=Depends(get_db)):
+    """Blocking is one-way: it only adds a row 'me blocks them'. Existing chat history is kept."""
+    if b.user_id == me.id or not db.get(User, b.user_id): raise HTTPException(400, "Invalid user")
+    if not db.query(Block).filter_by(user_id=me.id, blocked_id=b.user_id).first(): db.add(Block(user_id=me.id, blocked_id=b.user_id))
+    f = find_friendship(db, me.id, b.user_id)
+    if f and f.status == "pending": db.delete(f)            # drop unanswered friend requests between the two
+    db.commit()
+    c = calls.get(in_call.get(me.id))
+    if c and b.user_id in (c["caller"], c["callee"]): await end_call(db, in_call[me.id], "ended", by=me.id)   # hang up a running call
+    await mgr.send(b.user_id, {"type": "presence", "user": user_out(db.get(User, me.id), b.user_id)})       # hide my status from them now
+    return {"ok": True, "blocked": True}
 
 @app.post("/api/unblock")
-def unblock(b: IdIn, me=Depends(current_user), db=Depends(get_db)):
-    db.query(Block).filter_by(user_id=me.id, blocked_id=b.user_id).delete(); db.commit(); return {"ok": True}
+async def unblock(b: IdIn, me=Depends(current_user), db=Depends(get_db)):
+    db.query(Block).filter_by(user_id=me.id, blocked_id=b.user_id).delete(); db.commit()
+    await mgr.send(b.user_id, {"type": "presence", "user": user_out(db.get(User, me.id), b.user_id)})
+    return {"ok": True, "blocked": False}
 
 @app.get("/api/blocked")
 def blocked_list(me=Depends(current_user), db=Depends(get_db)):
@@ -327,7 +348,9 @@ async def make_group(b: GroupIn, me=Depends(current_user), db=Depends(get_db)):
     ids = set(b.member_ids) & set(friend_ids(db, me.id))
     if not b.name.strip() or not ids: raise HTTPException(400, "Give the group a name and pick at least one friend")
     chat = Chat(name=b.name.strip()[:80], is_group=True); db.add(chat); db.flush()
-    db.add_all([Member(chat_id=chat.id, user_id=i) for i in ids | {me.id}]); db.commit()
+    db.add_all([Member(chat_id=chat.id, user_id=i) for i in ids | {me.id}])
+    db.add(GroupInfo(chat_id=chat.id, created=datetime.utcnow(), owner_id=me.id, admins=json.dumps([me.id])))
+    db.add(Message(chat_id=chat.id, sender_id=me.id, kind="system", body=f"{me.name} created the group", status="read")); db.commit()
     for i in ids: await mgr.send(i, {"type": "chat_created"})
     return {"id": chat.id}
 
@@ -340,9 +363,11 @@ def chats(me=Depends(current_user), db=Depends(get_db)):
         other = None if c.is_group else next((u for u in users if u.id != me.id), None)
         last = db.query(Message).filter(Message.chat_id == c.id, Message.id > cleared).order_by(Message.id.desc()).first()
         if p.get("hidden") and not last: continue          # chat was deleted by me and nothing new arrived
+        gi = db.get(GroupInfo, c.id) if c.is_group else None
         unread = db.query(func.count(Message.id)).filter(Message.chat_id == c.id, Message.id > max(mem.last_read_id, cleared), Message.sender_id != me.id).scalar()
         out.append(dict(id=c.id, is_group=c.is_group, name=c.name if c.is_group else (other.name if other else "Deleted user"),
-                        avatar="" if c.is_group or not other else user_out(other, me.id)["avatar"], other=user_out(other, me.id) if other else None,
+                        avatar=(gi.avatar if gi else "") if c.is_group else ("" if not other else user_out(other, me.id)["avatar"]),
+                        blocked_by_me=bool(other and db.query(Block).filter_by(user_id=me.id, blocked_id=other.id).first()), other=user_out(other, me.id) if other else None,
                         members=[user_out(u, me.id) for u in users], last=msg_out(last) if last else None, unread=unread,
                         archived=bool(p.get("archived")), muted_until=p.get("muted_until", "")))
     out.sort(key=lambda c: (c["last"] or {}).get("created", ""), reverse=True)
@@ -387,8 +412,8 @@ def ice_servers(me=Depends(current_user)):
     return {"iceServers": servers}
 
 @app.get("/api/calls")
-def call_history(me=Depends(current_user), db=Depends(get_db)):
-    rows = db.query(CallLog).filter(or_(CallLog.caller_id == me.id, CallLog.receiver_id == me.id)).order_by(CallLog.id.desc()).limit(10).all()
+def call_history(limit: int = 10, me=Depends(current_user), db=Depends(get_db)):
+    rows = db.query(CallLog).filter(or_(CallLog.caller_id == me.id, CallLog.receiver_id == me.id)).order_by(CallLog.id.desc()).limit(min(max(limit, 1), 100)).all()
     out = []
     for r in rows:
         peer = db.get(User, r.receiver_id if r.caller_id == me.id else r.caller_id)
@@ -490,7 +515,8 @@ async def handle_ws(db, uid, data):
         if kind == "text" and not body: return
         if kind != "text" and not url.startswith("/uploads/"): return
         if not chat.is_group and any(is_blocked(db, uid, o) for o in others):
-            await mgr.send(uid, {"type": "error", "detail": "Message not sent: user is blocked"}); return
+            mine = any(db.query(Block).filter_by(user_id=uid, blocked_id=o).first() for o in others)
+            await mgr.send(uid, {"type": "error", "chat_id": cid, "detail": "You blocked this contact. Unblock them to send messages." if mine else "You can't send messages to this contact."}); return
         m = Message(chat_id=cid, sender_id=uid, kind=kind, body=body, file_url=url, file_name=(data.get("file_name") or "")[:120])
         db.add(m); db.commit()
         if any(mgr.online(o) for o in others): m.status = "delivered"
@@ -521,11 +547,11 @@ async def ws_endpoint(ws: WebSocket, token: str):
     ws.state.sid = sid
     mgr.conns.setdefault(uid, set()).add(ws)
     user.online = True; db.commit()
-    await broadcast_presence(db, user); await mark_delivered(db, uid)
+    await broadcast_presence(db, user); await mark_delivered(db, uid); await groups_api.gcall_sync(db, uid)
     try:
         while True:
             data = await ws.receive_json()
-            try: await (handle_call(db, uid, data) if str(data.get("type", "")).startswith("call_") else handle_ws(db, uid, data))
+            try: await (handle_call(db, uid, data) if str(data.get("type", "")).startswith("call_") else groups_api.handle_gcall(db, uid, data) if str(data.get("type", "")).startswith("gcall_") else handle_ws(db, uid, data))
             except WebSocketDisconnect: raise
             except Exception: db.rollback()
     except Exception: pass
@@ -534,10 +560,13 @@ async def ws_endpoint(ws: WebSocket, token: str):
         if not mgr.conns[uid]:
             user = db.get(User, uid); user.online = False; user.last_seen = datetime.utcnow(); db.commit()
             if uid in in_call: await end_call(db, in_call[uid], "disconnected", by=uid)  # hang up if the user vanished
+            await groups_api.gcall_drop(db, uid)                                         # leave any group call
             await broadcast_presence(db, user)
         db.close()
 
 from settings_api import router as settings_router  # settings / account / security endpoints (new file)
 app.include_router(settings_router)
+import groups_api  # group management + group calls (new file)
+app.include_router(groups_api.router)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR))
 app.mount("/", StaticFiles(directory=os.path.join(BASE, "..", "frontend"), html=True))
