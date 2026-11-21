@@ -4,7 +4,8 @@ const time=iso=>new Date(iso).toLocaleTimeString([],{hour:'2-digit',minute:'2-di
 let token=localStorage.token,me,chats=[],friends=[],requests=[],results=[],tab='chats',active=null,msgs={},ws,rec,timer;
 if(localStorage.dark)document.body.classList.add('dark');
 
-async function api(p,m='GET',b){
+async function api(p,m='GET',b){loading(1);try{return await api0(p,m,b)}finally{loading(-1)}}   // shows the top loading bar
+async function api0(p,m='GET',b){
   const r=await fetch('/api'+p,{method:m,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:b?JSON.stringify(b):undefined});
   const d=await r.json().catch(()=>({}));
   if(!r.ok){if(r.status===401&&token)logout();throw new Error(typeof d.detail==='string'?d.detail:'Please check your input')}
@@ -12,17 +13,17 @@ async function api(p,m='GET',b){
 }
 function toast(t){const e=document.createElement('div');e.className='toast';e.setAttribute('role','status');e.textContent=t;document.body.append(e);setTimeout(()=>e.remove(),3000)}
 const av=(name,img,on)=>`<div class="av">${img?`<img src="${esc(img)}">`:esc((name||'?')[0].toUpperCase())}${on?'<i class="dot"></i>':''}</div>`;
-const preview=m=>m.kind==='text'?m.body:{image:'📷 Photo',video:'🎬 Video',audio:'🎤 Voice message',file:'📄 Document'}[m.kind];
+const preview=m=>m.kind==='text'||m.kind==='system'?m.body:{image:'📷 Photo',video:'🎬 Video',audio:'🎤 Voice message',file:'📄 Document'}[m.kind];
 const cur=()=>chats.find(c=>c.id===active);
 
 // ---------- Auth ----------
 function setAuth(m){$('#loginForm').hidden=m!=='login';$('#regForm').hidden=m!=='reg';$('#tabLogin').classList.toggle('on',m==='login');$('#tabReg').classList.toggle('on',m==='reg')}
 async function submitAuth(e,mode){e.preventDefault();try{const d=await api(mode==='login'?'/login':'/register','POST',Object.fromEntries(new FormData(e.target)));token=d.token;localStorage.token=token;start()}catch(x){if(x.message==='2FA_REQUIRED'){$('#loginCode').hidden=false;$('#loginCode').focus();toast('Enter the 6-digit code from your authenticator app')}else toast(x.message)}}
-function logout(){const t=token;if(t)fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+t},keepalive:true}).catch(()=>{});localStorage.removeItem('token');localStorage.removeItem('fc_settings');token=null;ws&&ws.close();setTimeout(()=>location.reload(),200)}
+function logout(){try{history.replaceState(null,'',location.pathname+location.search)}catch(e){}const t=token;if(t)fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+t},keepalive:true}).catch(()=>{});localStorage.removeItem('token');localStorage.removeItem('fc_settings');token=null;ws&&ws.close();setTimeout(()=>location.reload(),200)}
 async function start(){
   try{me=await api('/me')}catch{return}
   $('#auth').hidden=true;$('#app').hidden=false;renderMe();
-  await Promise.all([loadSettings(),loadChats(),loadFriends()]);connect();
+  await Promise.all([loadSettings(),loadChats(),loadFriends(),loadBlocked()]);connect();navBoot();   // navBoot: nav.js opens the screen named in the URL
 }
 const renderMe=()=>$('#me').innerHTML=`<div class="row" style="padding:0">${av(me.name,me.avatar)}<b>${esc(me.name)}</b></div>`;
 
@@ -34,7 +35,7 @@ function searchUsers(q){clearTimeout(timer);timer=setTimeout(async()=>{results=a
 function renderList(){
   const L=$('#list');
   if(tab==='chats')L.innerHTML=chatListHTML();   // settings.js: archive, mute, preview, typing
-  else if(tab==='friends')L.innerHTML=(requests.length?'<h4>Friend requests</h4>':'')+requests.map(r=>`<div class="row">${av(r.user.name,r.user.avatar)}<div class="grow"><b>${esc(r.user.name)}</b><small>@${esc(r.user.username)}</small></div><button class="ok" onclick="respond(${r.id},true)">✓</button><button class="no" onclick="respond(${r.id},false)">✕</button></div>`).join('')+`<h4>Friends (${friends.length})</h4>`+friends.map(f=>`<div class="row" onclick="chatWith(${f.id})">${av(f.name,f.avatar,f.online)}<div class="grow"><b>${esc(f.name)}</b><small>${esc(f.bio||'@'+f.username)}</small></div><button class="no" onclick="event.stopPropagation();blockUser(${f.id})">Block</button></div>`).join('');
+  else if(tab==='friends')L.innerHTML=(requests.length?'<h4>Friend requests</h4>':'')+requests.map(r=>`<div class="row">${av(r.user.name,r.user.avatar)}<div class="grow"><b>${esc(r.user.name)}</b><small>@${esc(r.user.username)}</small></div><button class="ok" onclick="respond(${r.id},true)">✓</button><button class="no" onclick="respond(${r.id},false)">✕</button></div>`).join('')+`<h4>Friends (${friends.length})</h4>`+friends.map(f=>`<div class="row" onclick="chatWith(${f.id})">${av(f.name,f.avatar,f.online)}<div class="grow"><b>${esc(f.name)}</b><small>${esc(f.bio||'@'+f.username)}</small></div><button class="no" onclick="event.stopPropagation();toggleBlock(${f.id})">${blockedIds.has(f.id)?'Unblock':'Block'}</button></div>`).join('');
   else L.innerHTML=results.map(u=>`<div class="row">${av(u.name,u.avatar,u.online)}<div class="grow"><b>${esc(u.name)}</b><small>@${esc(u.username)}</small></div>${{none:`<button class="ok" onclick="addFriend(${u.id})">Add</button>`,sent:'<small>Pending</small>',received:'<small>Check Friends tab</small>',friend:'<small>Friends ✓</small>'}[u.relation]}</div>`).join('')||'<p class="empty">Type at least 2 letters to find people</p>';
 }
 async function addFriend(id){try{await api('/friends/request','POST',{user_id:id});toast('Friend request sent');results.find(u=>u.id===id).relation='sent';renderList()}catch(e){toast(e.message)}}
@@ -48,9 +49,10 @@ function openChat(id){
   (msgs[id]?Promise.resolve():api(`/chats/${id}/messages`).then(m=>msgs[id]=m)).then(()=>{renderMsgs();markRead()});
 }
 function closeChat(){active=null;document.body.classList.remove('chat-open');renderList()}
-function renderHead(){const c=cur();if(!c)return;const o=c.other;$('#callBtns').hidden=c.is_group;
+function renderHead(){const c=cur();if(!c)return;const o=c.other;$('#callBtns').hidden=false;$('#groupInfoBtn').hidden=!c.is_group;renderBlockBar(c);renderGcallBar(c);
   $('#head').innerHTML=`${av(c.name,c.avatar,o?.online)}<div><b>${esc(c.name)}</b><small>${headStatus(c)}</small></div>`}
 function msgHTML(m,c){
+  if(m.kind==='system')return `<div class="sysmsg">${esc(m.body)}</div>`;   // "X left", "X added Y" ...
   const mine=m.sender_id===me.id,s=c.members.find(u=>u.id===m.sender_id),u=esc(m.file_url);
   let b=mediaHTML(m);   // settings.js: respects auto-download settings
   if(m.body)b+=`<div>${esc(m.body)}</div>`;
