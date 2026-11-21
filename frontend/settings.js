@@ -72,20 +72,22 @@ function playSound(n){
     if(n==='chime'){tone(880,0,.25);tone(1320,.15,.35)}else if(n==='beep')tone(640,0,.25);else tone(400,0,.15,900)}catch(e){}
 }
 function notifyMsg(c,m){
+  if(m.kind==='system')return;
   const n=S.notif;if(isMuted(c)||!(c.is_group?n.groups:n.messages))return;
   playSound(n.sound);if(n.vibrate&&navigator.vibrate)navigator.vibrate(120);
   if(n.desktop&&'Notification' in window&&Notification.permission==='granted')new Notification(c.name,{body:n.preview?preview(m):'New message'});
 }
 const callAlerts=()=>S.notif.calls!==false;
 function handleExtra(d){
+  if(String(d.type).startsWith('gcall_'))return handleGcall(d);
   if(d.type==='typing'){typingAt[d.chat_id]=Date.now();refreshTyping();setTimeout(refreshTyping,3600);return true}
   if(d.type==='security'){toast('🔐 '+d.text);if(S.notif.desktop&&'Notification' in window&&Notification.permission==='granted')new Notification('Security alert',{body:d.text});return true}
   if(d.type==='media_deleted'){(msgs[d.chat_id]||[]).forEach(m=>{if(d.ids.includes(m.id)){m.kind='text';m.body='🗑️ Media deleted';m.file_url='';m.file_name=''}});if(active===d.chat_id)renderMsgs();return true}
   if(d.type==='account_removed'){loadFriends();loadChats().then(()=>{if(active&&!cur())resetPane()});return true}
-  return false;
+  return handleGroupEvent(d);
 }
 function refreshTyping(){renderList();if(active&&cur())renderHead()}
-function resetPane(){active=null;document.body.classList.remove('chat-open');$('#pane').hidden=true;$('#empty').hidden=false;renderList()}
+function resetPane(){hidePane();if(routeNow().startsWith('/chat/'))navReplace('/')}
 
 /* ---------- small UI helpers ---------- */
 const grp=(t,rows)=>`<div class="sgroup">${t?`<h4>${t}</h4>`:''}${rows}</div>`;
@@ -129,12 +131,12 @@ function fields(list){return list.map(f=>{
   return `<div class="srow">${lab}<select aria-labelledby="${id}l" onchange="setVal('${f.k}',this.value).then(()=>renderSection(true))">${VISO.map(o=>`<option value="${o[0]}" ${o[0]===v?'selected':''}>${o[1]}</option>`).join('')}</select></div>`+(v==='contacts_except'?`<div class="except" role="group" aria-label="Hide ${f.l} from"><small>Hide from these contacts:</small>${friends.map(u=>`<label class="chk"><input type="checkbox" name="ex_${f.k}" value="${u.id}" ${ex.includes(u.id)?'checked':''} onchange="setExcept('${f.k}')"> ${esc(u.name)}</label>`).join('')||'<small>No friends yet</small>'}</div>`:'');
 }).join('')}
 
-const SECS=[['account','🔑','Account','Email, phone, password, delete account'],['privacy','🔒','Privacy','Last seen, photo, about, receipts, blocked'],['security','🛡️','Security','Two-step verification, devices, alerts'],['chats','💬','Chats','Theme, wallpaper, font size, archive'],['notifications','🔔','Notifications','Messages, calls, sounds, mute'],['storage','🗄️','Storage and data','Usage, media, auto-download'],['profile','👤','Profile','Photo, name, about'],['devices','💻','Linked devices','Where you are logged in'],['access','♿','Accessibility','Font size, contrast, motion'],['help','❓','Help and support','FAQ, contact, policies, app info']];
-const TITLES={'chats:archive':'Archived chats','chats:clear':'Clear chat history','chats:delete':'Delete chats','notifications:mute':'Mute chats','help:faq':'FAQ','help:center':'Help center','help:privacy':'Privacy policy','help:terms':'Terms and conditions','help:about':'App information'};
+const SECS=[['account','🔑','Account','Email, phone, password, delete account'],['privacy','🔒','Privacy','Last seen, photo, about, receipts, blocked'],['security','🛡️','Security','Two-step verification, devices, alerts'],['chats','💬','Chats','Theme, wallpaper, font size, archive'],['notifications','🔔','Notifications','Messages, calls, sounds, mute'],['storage','🗄️','Storage and data','Usage, media, auto-download'],['profile','👤','Profile','Photo, name, about'],['devices','💻','Linked devices','Where you are logged in'],['access','♿','Accessibility','Font size, contrast, motion'],['calls','📞','Call history','Recent voice and video calls'],['help','❓','Help and support','FAQ, contact, policies, app info']];
+const TITLES={'calls':'Call history','chats:archive':'Archived chats','chats:clear':'Clear chat history','chats:delete':'Delete chats','notifications:mute':'Mute chats','help:faq':'FAQ','help:center':'Help center','help:privacy':'Privacy policy','help:terms':'Terms and conditions','help:about':'App information'};
 const titleOf=n=>TITLES[n]||(SECS.find(s=>s[0]===n)||[])[2]||'';
 const IDX=[];
 Object.entries({privacy:[...F.privacyVis,...F.privacyMsg],security:F.sec,chats:[...F.chatDisp,...F.chatType,...DLF],notifications:[...F.n1,...F.n2,...F.n3],storage:DLF,access:F.acc}).forEach(([go,a])=>a.forEach(f=>IDX.push({go,l:f.l,d:f.d})));
-[['account','Change email address'],['account','Change phone number'],['account','Change password'],['account','Download account information'],['account','Delete my account'],['account','Log out'],['account','Account security information'],['privacy','Blocked contacts'],['privacy','Default privacy settings'],['security','Two-step verification'],['security','Log out from other devices'],['security','Active devices'],['chats','Chat wallpaper'],['chats:archive','Archive chats'],['chats:clear','Clear chat history'],['chats:delete','Delete chat history'],['chats','Chat backup'],['notifications:mute','Mute notifications for contacts'],['notifications','Browser notification permission'],['storage','Storage usage'],['storage','Delete unnecessary media'],['storage','Data usage'],['profile','Change profile picture'],['profile','Remove profile picture'],['profile','Display name'],['profile','About information'],['profile','Preview profile'],['devices','Linked devices'],['help:faq','Frequently asked questions'],['help:center','Help center'],['help','Contact support'],['help','Report a problem'],['help:privacy','Privacy policy'],['help:terms','Terms and conditions'],['help:about','Version information']].forEach(([go,l])=>IDX.push({go,l,d:''}));
+[['account','Change email address'],['account','Change phone number'],['account','Change password'],['account','Download account information'],['account','Delete my account'],['account','Log out'],['account','Account security information'],['privacy','Blocked contacts'],['privacy','Default privacy settings'],['security','Two-step verification'],['security','Log out from other devices'],['security','Active devices'],['chats','Chat wallpaper'],['chats:archive','Archive chats'],['chats:clear','Clear chat history'],['chats:delete','Delete chat history'],['chats','Chat backup'],['notifications:mute','Mute notifications for contacts'],['notifications','Browser notification permission'],['storage','Storage usage'],['storage','Delete unnecessary media'],['storage','Data usage'],['profile','Change profile picture'],['profile','Remove profile picture'],['profile','Display name'],['profile','About information'],['profile','Preview profile'],['calls','Call history'],['devices','Linked devices'],['help:faq','Frequently asked questions'],['help:center','Help center'],['help','Contact support'],['help','Report a problem'],['help:privacy','Privacy policy'],['help:terms','Terms and conditions'],['help:about','Version information']].forEach(([go,l])=>IDX.push({go,l,d:''}));
 
 /* ---------- settings page shell + navigation ---------- */
 const SHELL=`<aside class="snav"><header><button class="icon" aria-label="Back to chats" onclick="closeSettings()">←</button><h2>Settings</h2></header>
@@ -153,16 +155,22 @@ async function renderHeader(){
   $('#sAv').innerHTML=av(me.name,me.avatar);$('#sName').textContent=me.name;
   try{const a=await api('/account');$('#sSub').textContent=[a.phone,a.email].filter(Boolean).join(' · ')}catch(e){}
 }
-function openSettings(){
+function openSettings(){lastFocus=document.activeElement;navPush(desktop()?'/settings/account':'/settings')}
+function showSettings(n){   // called by the router (nav.js) for every /settings/... address
   let el=$('#settings');
   if(!el){el=document.createElement('div');el.id='settings';el.className='spage';el.setAttribute('role','dialog');el.setAttribute('aria-modal','true');el.setAttribute('aria-label','Settings');el.innerHTML=SHELL;document.body.append(el)}
-  lastFocus=document.activeElement;el.hidden=false;pd=null;nav='';$('#sSearch').value='';renderHeader();
-  if(desktop())go('account');else{el.classList.remove('open');$('#sMenu').innerHTML=menuHTML()}
-  setTimeout(()=>el.querySelector('.snav .icon').focus(),50);
+  const opening=el.hidden;el.hidden=false;
+  if(opening){pd=null;$('#sSearch').value='';renderHeader()}
+  if(!n&&desktop()){navReplace('/settings/account');return}
+  if(n.split(':')[0]!==nav.split(':')[0])pd=null;
+  nav=n;el.classList.toggle('open',!!n);$('#sSearch').value='';$('#sMenu').innerHTML=menuHTML();
+  if(n)renderSection();else $('#sTitle').textContent='';
+  if(opening)setTimeout(()=>el.querySelector('.snav .icon').focus(),50);
 }
-function closeSettings(){$('#settings').hidden=true;lastFocus&&lastFocus.focus&&lastFocus.focus()}
-function go(n){if(n.split(':')[0]!==nav.split(':')[0])pd=null;nav=n;$('#settings').classList.add('open');$('#sSearch').value='';$('#sMenu').innerHTML=menuHTML();renderSection()}
-function sBack(){if(nav.includes(':'))return go(nav.split(':')[0]);if(!desktop()&&nav){nav='';$('#settings').classList.remove('open');$('#sMenu').innerHTML=menuHTML();return}closeSettings()}
+function hideSettings(){const s=$('#settings');if(s&&!s.hidden){s.hidden=true;nav='';lastFocus&&lastFocus.focus&&lastFocus.focus()}}
+const closeSettings=()=>navBack(active?'/chat/'+active:'/');
+function go(n){const r='/settings/'+n.replace(':','/');if(desktop()&&!n.includes(':')&&routeNow().startsWith('/settings'))navReplace(r);else navPush(r)}
+const sBack=()=>navBack();
 async function renderSection(keep){
   const [sec,sub]=nav.split(':'),b=$('#sBody'),y=b.scrollTop;if(!sec)return;
   $('#sTitle').textContent=titleOf(nav);
@@ -196,7 +204,6 @@ R.privacy=async()=>{
   +grp('',act('↩️','Default privacy settings','Reset visibility, read receipts and typing to the defaults',"confirmDlg('Reset privacy settings?','Everything in Privacy goes back to the default values.','Reset',()=>api('/settings/reset-privacy','POST').then(r=>{S=Object.assign({},S0,r);applySettings();renderSection(true)}),false)"))
   +note('Status/Stories is not part of this app, so there is no status privacy option. Blocked people cannot message or call you.');
 };
-const blockOp=(op,id)=>api('/'+op,'POST',{user_id:id}).then(()=>{loadFriends();renderSection(true)}).catch(e=>toast(e.message));
 
 R.security=async()=>{
   const [t,ss]=await Promise.all([api('/security/2fa'),api('/sessions')]);
@@ -236,8 +243,8 @@ function setMute(id,v){if(v==='keep')return;const u=v===''?'':v==='forever'?'for
 const clearChat=id=>confirmDlg('Clear this chat?','All messages are removed for you only. Your friend keeps their copy.','Clear',async()=>{await api(`/chats/${id}/clear`,'POST');msgs[id]=[];await loadChats();if(active===id)renderMsgs();if($('#settings')&&!$('#settings').hidden)renderSection(true)});
 const delChat=id=>confirmDlg('Delete this chat?','The chat and its history are removed from your list. Your friend keeps their copy.','Delete',async()=>{await api(`/chats/${id}/delete`,'POST');delete msgs[id];await loadChats();if(active===id)resetPane();if($('#settings')&&!$('#settings').hidden)renderSection(true)});
 function chatMenu(){
-  const c=cur();if(!c)return;
-  modal(`<h3>${esc(c.name)}</h3><div class="menu"><button class="no" onclick="closeModal();setArch(${c.id},${!c.archived})">${c.archived?'🗄️ Unarchive':'🗄️ Archive'}</button><label class="fld"><span>🔕 Mute notifications</span><select onchange="closeModal();setMute(${c.id},this.value)"><option value="keep">${muteLabel(c)}</option><option value="">Unmute</option><option value="8h">8 hours</option><option value="1w">1 week</option><option value="forever">Always</option></select></label><button class="no" onclick="closeModal();downloadApi('/chats/export?chat_id=${c.id}','chat-backup.json')">💾 Back up this chat</button><button class="no" onclick="clearChat(${c.id})">🧹 Clear chat</button><button class="callbtn red" onclick="delChat(${c.id})">🗑️ Delete chat</button></div><div class="actions"><button onclick="closeModal()">Close</button></div>`);
+  const c=cur();if(!c)return;const o=c.other;
+  modal(`<h3>${esc(c.name)}</h3><div class="menu">${c.is_group?`<button class="no" onclick="closeModal();navPush('/group/${c.id}')">ℹ️ Group info</button>`:`<button class="no" onclick="closeModal();navPush('/profile/${o.id}')">👤 View profile</button><button class="${c.blocked_by_me?'no':'callbtn red'}" onclick="closeModal();toggleBlock(${o.id})">${c.blocked_by_me?'✅ Unblock':'🚫 Block'}</button>`}<button class="no" onclick="closeModal();setArch(${c.id},${!c.archived})">${c.archived?'🗄️ Unarchive':'🗄️ Archive'}</button><label class="fld"><span>🔕 Mute notifications</span><select onchange="closeModal();setMute(${c.id},this.value)"><option value="keep">${muteLabel(c)}</option><option value="">Unmute</option><option value="8h">8 hours</option><option value="1w">1 week</option><option value="forever">Always</option></select></label><button class="no" onclick="closeModal();downloadApi('/chats/export?chat_id=${c.id}','chat-backup.json')">💾 Back up this chat</button><button class="no" onclick="clearChat(${c.id})">🧹 Clear chat</button><button class="no" onclick="delChat(${c.id})">🗑️ Delete chat (for me)</button>${c.is_group?`<button class="callbtn red" onclick="closeModal();exitGroup(${c.id})">🚪 Exit group</button>`:''}</div><div class="actions"><button onclick="closeModal()">Close</button></div>`);
 }
 
 R.notifications=async(sub)=>{
@@ -274,6 +281,7 @@ async function pPreview(){
   modal(`<h3>Profile preview</h3>${card('How your contacts see you',p.contact)}${card('How everyone else sees you',p.everyone)}<div class="actions"><button onclick="closeModal()">Close</button></div>`);
 }
 
+R.calls=async()=>{const l=await api('/calls?limit=50');return grp('Recent calls',l.map(c=>`<div class="srow"><span class="ic" aria-hidden="true">${c.call_type==='video'?'🎥':'📞'}</span><div class="grow"><b>${c.outgoing?'↗':'↙'} ${esc(c.peer)}</b><small>${esc(c.status)}${c.duration?' · '+fmt(c.duration*1000):''} · ${new Date(c.started).toLocaleString([],{dateStyle:'short',timeStyle:'short'})}</small></div></div>`).join('')||'<div class="srow"><small>No calls yet</small></div>')+note('Group calls appear as messages inside the group chat.')};
 R.devices=async()=>{
   const ss=await api('/sessions'),row=s=>`<div class="srow"><span class="ic" aria-hidden="true">${/Android|iOS/.test(s.device)?'📱':'💻'}</span><div class="grow"><b>${esc(s.device)} ${s.current?'<span class="badge">This device</span>':''}</b><small>IP ${esc(s.ip||'unknown')} · active ${ago(s.last_active)} · signed in ${new Date(s.created).toLocaleDateString()}</small></div><button class="no" onclick="endSession('${s.id}',${s.current})">Log out</button></div>`;
   const cur=ss.filter(s=>s.current),oth=ss.filter(s=>!s.current);
