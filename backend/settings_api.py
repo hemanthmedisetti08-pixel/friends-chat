@@ -322,4 +322,5 @@ def support(b: SupportIn, request: Request, me=Depends(current_user), db=Depends
     return {"ok": True}
 
 @router.get("/app-info")
-def app_info(): return dict(name="Friends Chat", version=os.getenv("APP_VERSION", "1.3.0"), support_email=os.getenv("SUPPORT_EMAIL", ""))
+def app_info(): return dict(name="Friends Chat", version=os.getenv("APP_VERSION", "1.4.0"), support_email=os.getenv("SUPPORT_EMAIL", ""),
+                group_calls=all(os.getenv(k) for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")))
